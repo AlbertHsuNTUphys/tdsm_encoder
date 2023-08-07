@@ -2,12 +2,49 @@ import h5py, math, torch, fnmatch, os
 import numpy as np
 from torch.utils.data import Dataset
 import torch.nn.functional as F
+from XMLHandler import XMLHandler
+
+def digitize(tensor, bin_edges,device, middle='true'):
+    bin_edges = torch.tensor(bin_edges,device=torch.device(device))
+
+    # Digitize the tensor into bin indices
+    bin_indices = torch.bucketize(tensor, bin_edges)
+    
+    # Calculate the corresponding middle values
+    bin_indices[bin_indices >= len(bin_edges)] = len(bin_edges)-1
+    bin_indices[bin_indices == -1] = 0
+    middle_values = (bin_edges[bin_indices] + bin_edges[bin_indices - 1]) / 2
+    return middle_values
+
+def digitize_input(sample_list, particle, filename):
+    xml = XMLHandler(particle, filename=filename)
+    r_edge = xml.r_edges[0]
+    n_theta_bin = xml.a_bins[0]
+    theta_edge = np.linspace(-math.pi, math.pi, n_theta_bin)
+    z_bin = len(xml.r_edges)
+    z_edge = np.linspace(-0.5, z_bin - 0.5,z_bin+1)
+    trans_event = []
+    for event in sample_list:
+        r = torch.sqrt(event[:,1]*event[:,1] + event[:,2]*event[:,2])
+        theta = torch.atan(event[:,2]/event[:,1]) + torch.pi*torch.where(event[:,1]<0, torch.tensor(1), torch.tensor(0))
+        middle_r = digitize(r,r_edge,'cpu')
+        middle_theta = digitize(theta, theta_edge,'cpu')
+        middle_z = digitize(event[:,3],z_edge,'cpu')
+        x = middle_r*torch.cos(middle_theta)
+        y = middle_r*torch.sin(middle_theta)
+        output_ = torch.stack((event[:,0],x,y,middle_z),dim=1)
+        trans_event.append(output_)
+    return trans_event
+
 
 class cloud_dataset(Dataset):
-  def __init__(self, filename, transform=None, transform_y=None, device='cpu'):
+  def __init__(self, filename, transform=None, transform_y=None, device='cpu', transformed=False):
     loaded_file = torch.load(filename, map_location=torch.device(device))
     self.data = loaded_file[0]
-    self.condition = torch.tensor(loaded_file[1], dtype=torch.long, device=torch.device(device))
+    if transformed:
+      self.condition = torch.tensor(loaded_file[1], device=torch.device(device))
+    else:
+      self.condition = torch.tensor(loaded_file[1], dtype=torch.long, device=torch.device(device))
     self.transform = transform
     self.transform_y = transform_y
     self.min_y = torch.min(self.condition)
@@ -28,15 +65,39 @@ class cloud_dataset(Dataset):
   def __len__(self):
     return len(self.data)
 
+  def digitize(self, particle='electron', xml_bin='binning_dataset_2.xml'):
+    self.data = digitize_input(self.data, particle, xml_bin)
+
+  def transformed(self):
+    transformed_showers = []
+    xmin, xmax = -40, 40
+    ymin, ymax = -40, 40
+    zmin, zmax = 0, 45
+    e_middle, e_rms = -10 ,5 #Experimental value
+    for idx, showers in enumerate(self.data):
+      #e_ = torch.log(0.5*(showers[:,0]/self.condition[idx]+1.)/(1.-0.5*(self.condition[idx]+1.)))
+      e_ = showers[:,0]/(self.condition[idx]*2.)
+      e_ = (torch.log(e_/(1.-e_))-e_middle)/e_rms
+      x_ = 2.*(showers[:,1] - xmin)/(xmax-xmin)-1.
+      y_ = 2.*(showers[:,2] - ymin)/(ymax-ymin)-1.
+      z_ = 2.*(showers[:,3] - zmin)/(zmax-zmin)-1.
+      transformed_showers.append(torch.stack((e_,x_,y_,z_),-1))
+    self.data = transformed_showers
+    self.condition = self.condition/torch.max(self.condition)
+    self.condition.to(torch.float32)
+
+
   def padding(self, value = -20):
     
     for showers in self.data:
       if len(showers) > self.max_nhits:
         self.max_nhits = len(showers)
 
+    print(self.max_nhits)
     padded_showers = []
     for showers in self.data:
       pad_hits = self.max_nhits-len(showers)
+      if len(showers) == 0: continue
       padded_shower = F.pad(input = showers, pad=(0,0,0,pad_hits), mode='constant', value = value)
       padded_showers.append(padded_shower)
 
@@ -46,6 +107,7 @@ class cloud_dataset(Dataset):
     if save_name is None:
       print("Must assign name to saved file.")
       return 0
+    print(self.condition.dtype)
     torch.save([self.data, self.condition], save_name)
 
 class rescale_conditional:

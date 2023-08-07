@@ -64,4 +64,4 @@ def plot_distribution(point_clouds_loader, label="", padding_value=-20):
     ax[1][1].hist(all_z, 50, label=label)
     ax[1][1].legend(loc='upper right')
     return fig
-    
+

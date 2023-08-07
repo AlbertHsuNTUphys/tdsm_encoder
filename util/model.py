@@ -9,6 +9,8 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset, DataLoader
 import util.dataset_structure, util.display, util.model
 import tqdm
+import matplotlib.cm as cm
+import matplotlib.animation as animation
 
 class GaussianFourierProjection(nn.Module):
     """Gaussian random features for encoding time steps"""
@@ -225,7 +227,7 @@ def loss_fn(model, x, incident_energies, marginal_prob_std , eps=1e-5, device='c
     #print(f'Summed losses (dim=1,2): {summed_losses}')
     return batch_loss
 
-def  pc_sampler(score_model, marginal_prob_std, diffusion_coeff, sampled_energies, init_x, batch_size=1, snr=0.16, device='cuda', eps=1e-3, mask=True, padding_value=-20, jupyternotebook=False):
+def  pc_sampler(score_model, marginal_prob_std, diffusion_coeff, sampled_energies, init_x, batch_size=1, snr=0.16, device='cuda', eps=1e-3, mask=True, padding_value=-20, jupyternotebook=False, event_id=0, video=False, rotate_angle = [-90,0]):
     ''' Generate samples from score based models with Predictor-Corrector method
         Args:
         score_model: A PyTorch model that represents the time-dependent score-based model.
@@ -253,6 +255,10 @@ def  pc_sampler(score_model, marginal_prob_std, diffusion_coeff, sampled_energie
 
     if jupyternotebook:
       time_steps = tqdm.notebook.tqdm(time_steps)
+      from IPython import display
+      fig = plt.figure()
+      dh = display.display(fig, display_id=True)
+
     x = init_x
 #    print(f'input x shape: {init_x.shape}')
     with torch.no_grad():
@@ -304,8 +310,28 @@ def  pc_sampler(score_model, marginal_prob_std, diffusion_coeff, sampled_energie
             else:
               x_mean = x + (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies) * step_size
             x = x_mean + torch.sqrt(diff**2 * step_size)[:, None, None] * torch.randn_like(x)
-            
-  #  print(f'x_mean: {x_mean}')
+
+            if video:
+              demo = x[event_id,:]
+              demo_ = demo.cpu().numpy().copy()
+              mask_ = (~mask_tensor[event_id]).cpu().numpy().copy()
+              demo_ = demo_[mask_]
+
+              plt.close(fig)
+              fig = plt.figure()
+              ax = fig.add_subplot(111, projection='3d')
+              ax.set_xlabel('x')
+              ax.set_ylabel('y')
+              ax.set_zlabel('z')
+
+              img = ax.scatter(demo_[:,1], demo_[:,2], demo_[:,3], c=demo_[:,0])
+              fig.colorbar(img)
+              ax.view_init(rotate_angle[0],rotate_angle[1])
+              ax.text(-1,-1,-1,'step=%.4f'%time_step , fontsize=12, color='red')
+              dh.update(fig)
+
+    plt.show()
+  #  printtf'x_mean: {x_mean}')
     # Do not include noise in last step
     return x_mean
 
@@ -395,6 +421,7 @@ def training(batch_size = 150,
                 optimiser.zero_grad()
                 batch_loss_averaged.backward(retain_graph=True)
                 optimiser.step()
+                #print(file_name, i, torch.cuda.memory_allocated(device=device)/1024/1024/1024, 'GB')
                 
             for i, (shower_data, incident_energies) in enumerate(shower_loader_test,0):
                 with torch.no_grad():
@@ -404,11 +431,12 @@ def training(batch_size = 150,
                         test_loss = util.model.loss_fn(model, shower_data, incident_energies, new_marginal_prob_std_fn, device=device)
                     test_batch_loss_averaged = test_loss/len(shower_data)
                     cumulative_test_epoch_loss+= test_batch_loss_averaged.item()*batch_size
-            av_training_losses_per_epoch.append(cumulative_epoch_loss/n_training_showers)
-            av_testing_losses_per_epoch.append(cumulative_test_epoch_loss/n_testing_showers)
-            #print(f'End-of-epoch: average train loss = {av_training_losses_per_epoch}, average test loss = {av_testing_losses_per_epoch}')
+
+        av_training_losses_per_epoch.append(cumulative_epoch_loss/n_training_showers)
+        av_testing_losses_per_epoch.append(cumulative_test_epoch_loss/n_testing_showers)
+        #print(f'End-of-epoch: average train loss = {av_training_losses_per_epoch}, average test loss = {av_testing_losses_per_epoch}')
             
-            torch.save(model.state_dict(), output_directory+'ckpt_tmp_'+str(epoch)+'.pth')
+        torch.save(model.state_dict(), output_directory+'ckpt_tmp_'+str(epoch)+'.pth')
         
         if not jupyternotebook:
             print('Training losses : ', av_training_losses_per_epoch)
@@ -473,7 +501,9 @@ def generate_sample(model=None,
                     jupyternotebook = False,
                     label='sample',
                     transform   = None,
-                    transform_y = None):
+                    transform_y = None,
+                    video = False,
+                    rotate_angle=[-90,0]):
     
     in_energies = in_energies.cpu().numpy()
     
@@ -489,7 +519,7 @@ def generate_sample(model=None,
     all_incident_e = []
     max_hits = -1
     for file in sampled_file_list:
-        custom_data = util.dataset_structure.cloud_dataset(file, device=device)
+        custom_data = util.dataset_structure.cloud_dataset(file, device=device, transformed=True)
         point_clouds_loader = DataLoader(custom_data, batch_size=sample_batch_size, shuffle=False)
         
         for i, (shower_data, incident_energies) in enumerate(point_clouds_loader,0):
@@ -497,7 +527,7 @@ def generate_sample(model=None,
             data_np = shower_data.cpu().numpy().copy()
             energy_np = incident_energies.cpu().numpy().copy()
     
-            masking = data_np[:,:,3] > -10
+            masking = ~(data_np[:,:,3] == padding_value)
 
             for j in range(len(data_np)):
                 valid_event = data_np[j][masking[j]]
@@ -509,11 +539,12 @@ def generate_sample(model=None,
         
     entries = np.array(entries)
     all_incident_e = np.array(all_incident_e)
-    e_vs_nhits_prob, x_bin, y_bin = get_prob_dist(all_incident_e, entries, n_bin)    
+    e_vs_nhits_prob, x_bin, y_bin = get_prob_dist(all_incident_e, entries, n_bin)   
+    print(e_vs_nhits_prob, x_bin, y_bin) 
     nhits, gen_hits = generate_hits(e_vs_nhits_prob, x_bin, y_bin, in_energies, max_hits, 4, device=device)
     torch.save([gen_hits, in_energies],'tmp.pt')
   
-    gen_hits = util.dataset_structure.cloud_dataset('tmp.pt', device=device, transform=transform, transform_y=transform_y)
+    gen_hits = util.dataset_structure.cloud_dataset('tmp.pt', device=device)
     gen_hits.padding(padding_value)
     os.system("rm tmp.pt")
     sample = []
@@ -522,7 +553,7 @@ def generate_sample(model=None,
         sys.stdout.write('\r')
         sys.stdout.write("Progress: %d/%d" % ((i+1), len(gen_hits_loader)))
         sys.stdout.flush()
-        generative = util.model.pc_sampler(model, marginal_prob_std, diffusion_coeff, sampled_energies, gen_hit, batch_size=len(gen_hit), snr=0.16, device=device, eps=1e-3, mask=mask, jupyternotebook=jupyternotebook, padding_value=padding_value)
+        generative = util.model.pc_sampler(model, marginal_prob_std, diffusion_coeff, sampled_energies, gen_hit, batch_size=len(gen_hit), snr=0.16, device=device, eps=1e-3, mask=mask, jupyternotebook=jupyternotebook, padding_value=padding_value, video=video, rotate_angle=rotate_angle)
         if i == 0:
             sample = generative
         else:
@@ -533,5 +564,5 @@ def generate_sample(model=None,
         tmp_sample = sample_np[i][:nhits[i]]
         sample_.append(torch.tensor(tmp_sample))
     torch.save([sample_,in_energies], os.path.join(output_directory, 'sample.pt'))
-    return sample_, in_energies, nhits
+    return sample_, in_energies, nhits, e_vs_nhits_prob
 
