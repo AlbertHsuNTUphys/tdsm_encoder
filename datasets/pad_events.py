@@ -96,7 +96,7 @@ def main():
         if fnmatch.fnmatch(infile, 'dataset_1_photons_tensor_no_pedding_euclidian_nentry*.pt'):
             filename = os.path.join(indir,infile)
             ofile = infile.replace("tensor_no_pedding_euclidian", "padded" )
-            opath = '/eos/user/j/jthomasw/tdsm_encoder/datasets/'
+            opath = '/eos/user/t/tihsu/SWAN_Projects/ML_hackathon/tdsm_encoder/datasets/'
             odir = os.path.join(opath,odir)
             if not os.path.exists(odir):
                 os.makedirs(odir)

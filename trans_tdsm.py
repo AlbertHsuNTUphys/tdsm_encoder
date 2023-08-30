@@ -227,7 +227,7 @@ def loss_fn(model, x, incident_energies, marginal_prob_std , eps=1e-3, device='c
     
     # Noise input multiplied by mask so we don't go perturbing zero padded values to have some non-sentinel value
     r1, r2 = -2,2
-    noise = (r1 - r2) * torch.rand_like(shower_data) + r2
+    noise = (r1 - r2) * torch.rand_like(x) + r2
     z = noise*output_mask
     z = z.to(device)
     # Sample from standard deviation of noise

@@ -13,7 +13,7 @@ from pickle import load
 from matplotlib import cm
 sys.path.insert(1, '../')
 
-def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot=100, padding_value=-20, batch_size=1, energy_trans_file='', x_trans_file='', y_trans_file='', ine_trans_file=''):
+def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot=100, padding_value=-20, batch_size=1, energy_trans_file='', x_trans_file='', y_trans_file='', z_trans_file='',ine_trans_file=''):
     
     '''
     files_ = can be a list of input files or a cloud dataset object
@@ -28,6 +28,7 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
     shower_hit_energies = []
     shower_hit_x = []
     shower_hit_y = []
+    shower_hit_z = []
     all_z = []
     shower_hit_ine = []
     total_deposited_e_shower = []
@@ -55,6 +56,10 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
             print(f'Loading file for hit y transformation inversion: {y_trans_file}')
             # Load saved pre-processor
             scalar_y = load(open(y_trans_file, 'rb'))
+        if z_trans_file != '':
+           z_trans_file = os.path.join(files_[0].rsplit('/',1)[0],z_trans_file)
+           print(f'Loading file for hit z transformation inversion: {z_trans_file}')
+           scalar_z = load(open(z_trans_file, 'rb'))
         if ine_trans_file != '':
             ine_trans_file = os.path.join(files_[0].rsplit('/',1)[0],ine_trans_file)
             print(f'Loading file for incident e transformation inversion: {ine_trans_file}')
@@ -106,22 +111,26 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
                     all_e = np.array(valid_hits[:,0]).reshape(-1,1)
                     all_x = np.array(valid_hits[:,1]).reshape(-1,1)
                     all_y = np.array(valid_hits[:,2]).reshape(-1,1)
+                    all_z = np.array(valid_hits[:,3]).reshape(-1,1)
                     if energy_trans_file != '':
                         all_e = scalar_e.inverse_transform(all_e)
                     if x_trans_file != '':
                         all_x = scalar_x.inverse_transform(all_x)
                     if y_trans_file != '':
                         all_y = scalar_y.inverse_transform(all_y)
-                    
+                    if z_trans_file != '':
+                        all_z = scalar_z.inverse_transform(all_z)
+ 
                     all_e = all_e.flatten().tolist()
                     all_x = all_x.flatten().tolist()
                     all_y = all_y.flatten().tolist()
-                    
+                    all_z = all_z.flatten().tolist()
+
                     # Store features of individual hits in shower
                     shower_hit_energies.extend( all_e )
                     shower_hit_x.extend( all_x )
                     shower_hit_y.extend( all_y )
-                    all_z.extend( ((valid_hits).copy()[:,3]).flatten().tolist() )
+                    shower_hit_z.extend( all_z)
                     hits_ine = [ incident_energies[j] for x in range(0,len(valid_hits[:,0])) ]
                     shower_hit_ine.extend( hits_ine )
                     
@@ -163,20 +172,21 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
                 all_e = np.array(valid_hits[:,0]).reshape(-1,1)
                 all_x = np.array(valid_hits[:,1]).reshape(-1,1)
                 all_y = np.array(valid_hits[:,2]).reshape(-1,1)
+                all_z = np.array(valid_hits[:,3]).reshape(-1,1)
                 if energy_trans_file != '':
                     all_e = scalar_e.inverse_transform(all_e)
                     all_x = scalar_x.inverse_transform(all_x)
                     all_y = scalar_y.inverse_transform(all_y)
+                    all_z = scalar_z.inverse_transform(all_z)
                 all_e = all_e.flatten().tolist()
                 all_x = all_x.flatten().tolist()
                 all_y = all_y.flatten().tolist()
-                
+                all_z = all_z.flatten().tolist()
                 # Store features of individual hits in shower
                 shower_hit_energies.extend( all_e )
                 shower_hit_x.extend( all_x )
                 shower_hit_y.extend( all_y )
-                all_z.extend( ((valid_hits).copy()[:,3]).flatten().tolist() )
-                
+                shower_hit_z.extend(all_z)                
                 shower_hit_ine.extend( [incident_energies[j] for x in valid_hits[:,0]] )
                 
                 # Number of valid hits
@@ -190,7 +200,7 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
                 average_y_shower.extend( [np.mean(all_y)] )
                 average_z_shower.extend( [np.mean(all_z)] )
 
-    return [entries, all_incident_e, total_deposited_e_shower, shower_hit_energies, shower_hit_x, shower_hit_y, all_z, shower_hit_ine, average_x_shower, average_y_shower, average_z_shower]
+    return [entries, all_incident_e, total_deposited_e_shower, shower_hit_energies, shower_hit_x, shower_hit_y, shower_hit_z, shower_hit_ine, average_x_shower, average_y_shower, average_z_shower]
 
 def perturbation_1D(distributions, outdir='./'):
     xlabel = distributions[0][0]
@@ -542,5 +552,4 @@ def make_diffusion_plot(distributions, outdir=''):
     print(f'save_name: {save_name}')
     fig.savefig(save_name)
 
-    return
->>>>>>> cca53f499fea4e70d2a99b8069fc2689e322c9db
+    return plt
