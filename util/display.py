@@ -14,7 +14,7 @@ from matplotlib import cm
 sys.path.insert(1, '../')
 
 def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot=100, padding_value=-20, batch_size=1, energy_trans_file='', x_trans_file='', y_trans_file='', z_trans_file='',ine_trans_file=''):
-    
+
     '''
     files_ = can be a list of input files or a cloud dataset object
     nshowers_2_plot = # showers you want to plot. Limits memory required. Samples evenly from several files if files input is used.
@@ -89,8 +89,9 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
                 valid_hits = []
                 data_np = shower_data.cpu().numpy().copy()
                 incident_energies = incident_energies.cpu().numpy().copy()
+                
                 # Mask for padded values
-                mask = ~(data_np[:,:,3] == padding_value)
+                mask = ~(data_np[:,:,0] == padding_value)
                 
                 incident_energies = np.array(incident_energies).reshape(-1,1)
                 if ine_trans_file != '':
@@ -104,8 +105,8 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
                         break
                     shower_counter+=1
                     
-                    # Only use non-padded values
-                    valid_hits = data_np[j][mask[j]]
+                    # Only use non-padded values for plots
+                    valid_hits = data_np[j]#[mask[j]]
                     
                     # To transform back to original energies for plots
                     all_e = np.array(valid_hits[:,0]).reshape(-1,1)
@@ -154,19 +155,20 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
             # Load saved pre-processor
             print(f'Loading file for transformation inversion: {energy_trans_file}')
             scalar_e = load(open(energy_trans_file, 'rb'))
-        print(f'number of batches: {len(point_clouds_loader)}')
+
         for i, (shower_data,incident_energies) in enumerate(point_clouds_loader,0):
             valid_hits = []
             data_np = shower_data.cpu().numpy().copy()
             energy_np = incident_energies.cpu().numpy().copy()
-            mask = ~(data_np[:,:,3] == padding_value)
+            mask = ~(data_np[:,:,0] == padding_value)
             
             # For each shower in batch
             for j in range(len(data_np)):
                 if shower_counter >= nshowers_2_plot:
                     break
+                    
                 shower_counter+=1
-                valid_hits = data_np[j][mask[j]]
+                valid_hits = data_np[j]#[mask[j]]
                 
                 # To transform back to original energies for plots                    
                 all_e = np.array(valid_hits[:,0]).reshape(-1,1)
@@ -472,8 +474,8 @@ def make_diffusion_plot(distributions, outdir=''):
     ax_X, ax_T1, ax_T2, ax_T3, ax_T4 = create_axes_diffusion(int(n_plots))
     axarr = (ax_X, ax_T1, ax_T2, ax_T3, ax_T4)
     
-    x_lim = ( min(min(gen_x_t1),min(gen_x_t99),min(geant_x)) , max(max(gen_x_t1),max(gen_x_t99),max(geant_x)) )
-    y_lim = ( min(min(gen_y_t1),min(gen_y_t99),min(geant_y)) , max(max(gen_y_t1),max(gen_y_t99),max(geant_y)) )
+    x_lim = ( min(min(gen_x_t1),min(geant_x)) , max(max(gen_x_t1),max(geant_x)) )
+    y_lim = ( min(min(gen_y_t1),min(geant_y)) , max(max(gen_y_t1),max(geant_y)) )
     
     plot_diffusion_xy(
         axarr[0],
@@ -489,6 +491,8 @@ def make_diffusion_plot(distributions, outdir=''):
         ylim=y_lim
     )
     
+    x_lim = ( min(min(gen_x_t25),min(geant_x)) , max(max(gen_x_t25),max(geant_x)) )
+    y_lim = ( min(min(gen_y_t25),min(geant_y)) , max(max(gen_y_t25),max(geant_y)) )
     plot_diffusion_xy(
         axarr[1],
         gen_x_t25,
@@ -503,6 +507,8 @@ def make_diffusion_plot(distributions, outdir=''):
         ylim=y_lim
     )
     
+    x_lim = ( min(min(gen_x_t50),min(geant_x)) , max(max(gen_x_t50),max(geant_x)) )
+    y_lim = ( min(min(gen_y_t50),min(geant_y)) , max(max(gen_y_t50),max(geant_y)) )
     plot_diffusion_xy(
         axarr[2],
         gen_x_t50,
@@ -517,6 +523,8 @@ def make_diffusion_plot(distributions, outdir=''):
         ylim=y_lim
     )
     
+    x_lim = ( min(min(gen_x_t75),min(geant_x)) , max(max(gen_x_t75),max(geant_x)) )
+    y_lim = ( min(min(gen_y_t75),min(geant_y)) , max(max(gen_y_t75),max(geant_y)) )
     plot_diffusion_xy(
         axarr[3],
         gen_x_t75,
@@ -531,6 +539,8 @@ def make_diffusion_plot(distributions, outdir=''):
         ylim=y_lim
     )
     
+    x_lim = ( min(min(gen_x_t99),min(geant_x)) , max(max(gen_x_t99),max(geant_x)) )
+    y_lim = ( min(min(gen_y_t99),min(geant_y)) , max(max(gen_y_t99),max(geant_y)) )
     plot_diffusion_xy(
         axarr[4],
         gen_x_t99,

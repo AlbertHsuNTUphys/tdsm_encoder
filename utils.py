@@ -13,7 +13,6 @@ class cloud_dataset(Dataset):
     self.min_y = torch.min(self.condition)
     self.max_y = torch.max(self.condition)
     self.max_nhits = -1
-
     self.transform = transform
     self.transform_y = transform_y
     self.device = device
@@ -30,7 +29,7 @@ class cloud_dataset(Dataset):
   def __len__(self):
     return len(self.data)
   
-  def padding(self, value = -20):
+  def padding(self, value = 0.0):
     for showers in self.data:
         if len(showers) > self.max_nhits:
             self.max_nhits = len(showers)
@@ -40,7 +39,7 @@ class cloud_dataset(Dataset):
       pad_hits = self.max_nhits-len(showers)
       padded_shower = F.pad(input = showers, pad=(0,0,0,pad_hits), mode='constant', value = value)
       padded_showers.append(padded_shower)
-
+    
     self.data = padded_showers
 
 class rescale_conditional:

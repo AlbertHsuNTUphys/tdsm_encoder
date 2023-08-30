@@ -200,7 +200,7 @@ class Gen(nn.Module):
         output = self.out(x) / std_[:, None, None]
         return output
 
-def loss_fn(model, x, incident_energies, marginal_prob_std , eps=1e-3, device='cpu'):
+def loss_fn(model, x, incident_energies, marginal_prob_std , padding_value, eps=1e-3, device='cpu'):
     """The loss function for training score-based generative models
     Uses the weighted sum of Denoising Score matching objectives
     Denoising score matching
@@ -216,9 +216,9 @@ def loss_fn(model, x, incident_energies, marginal_prob_std , eps=1e-3, device='c
     """
     # Generate padding mask for padded entries
     # Positions with True are ignored while False values will be unchanged
-    padding_mask = (x[:,:,0]==-20).type(torch.bool)
+    padding_mask = (x[:,:,0] == 0).type(torch.bool)
     # Inverse mask to ignore for when 0-padded hits should be ignored
-    output_mask = (x[:,:,0]!=-20).type(torch.int)
+    output_mask = (x[:,:,0] != 0).type(torch.int)
     output_mask = output_mask.unsqueeze(-1)
     output_mask = output_mask.expand(output_mask.size()[0], output_mask.size()[1],4)
     
@@ -226,35 +226,34 @@ def loss_fn(model, x, incident_energies, marginal_prob_std , eps=1e-3, device='c
     random_t = torch.rand(incident_energies.shape[0], device=device) * (1. - eps) + eps
     
     # Noise input multiplied by mask so we don't go perturbing zero padded values to have some non-sentinel value
-    r1, r2 = -2,2
-    noise = (r1 - r2) * torch.rand_like(x) + r2
-    z = noise*output_mask
+    z = torch.normal(0,1,size=x.shape, device=device)
     z = z.to(device)
+    
     # Sample from standard deviation of noise
     mean_, std_ = marginal_prob_std(x,random_t)
+    
     # Add noise to input
-    perturbed_x = x + z * std_[:, None, None]
-    #perturbed_x = mean_ + std_[:, None, None] * z
+    perturbed_x = mean_ + std_[:, None, None]*z
 
     # Evaluate model (aim: to estimate the score function of each noise-perturbed distribution)
     scores = model(perturbed_x, random_t, incident_energies, mask=padding_mask)
     
     # Calculate loss 
-    loss = (scores*std_[:,None,None] + z)**2
+    losses = torch.square(scores*std_[:,None,None] + z)
 
     # Zero losses calculated over padded inputs
-    loss = loss*output_mask
+    losses = losses#*output_mask
     
-    # Sum loss across all hits and 4-vectors (normalise by number of hits)
-    sum_loss = torch.mean( loss, dim=(1,2))
+    # Losses across all hits and 4-vectors (normalise by number of hits)
+    losses = torch.mean( losses, dim=(1,2))
 
     # Average across batch
-    batch_loss = torch.mean( sum_loss )
+    batch_loss = torch.mean( losses )
     
     return batch_loss
 
 class pc_sampler:
-    def __init__(self, sde, snr=0.16, sampler_steps=100, device='cuda', eps=1e-3, jupyternotebook=False):
+    def __init__(self, sde, padding_value, snr=0.16, sampler_steps=100, device='cuda', eps=1e-3, jupyternotebook=False):
         ''' Generate samples from score based models with Predictor-Corrector method
             Args:
             score_model: A PyTorch model that represents the time-dependent score-based model.
@@ -272,61 +271,57 @@ class pc_sampler:
         '''
         self.sde = sde
         self.snr = snr
+        self.padding_value = padding_value
         self.sampler_steps = sampler_steps
         self.device = device
         self.eps = eps
         self.jupyternotebook = jupyternotebook
         
-        self.deposited_energy_t1 = []
-        self.deposited_energy_t25 = []
-        self.deposited_energy_t50 = []
-        self.deposited_energy_t75 = []
-        self.deposited_energy_t99 = []
+        self.deposited_energy_step1 = []
+        self.deposited_energy_step25 = []
+        self.deposited_energy_step50 = []
+        self.deposited_energy_step75 = []
+        self.deposited_energy_step99 = []
         
-        self.av_x_pos_t1 = []
-        self.av_x_pos_t25 = []
-        self.av_x_pos_t50 = []
-        self.av_x_pos_t75 = []
-        self.av_x_pos_t99 = []
+        self.av_x_pos_step1 = []
+        self.av_x_pos_step25 = []
+        self.av_x_pos_step50 = []
+        self.av_x_pos_step75 = []
+        self.av_x_pos_step99 = []
         
-        self.av_y_pos_t1 = []
-        self.av_y_pos_t25 = []
-        self.av_y_pos_t50 = []
-        self.av_y_pos_t75 = []
-        self.av_y_pos_t99 = []
+        self.av_y_pos_step1 = []
+        self.av_y_pos_step25 = []
+        self.av_y_pos_step50 = []
+        self.av_y_pos_step75 = []
+        self.av_y_pos_step99 = []
         
-        self.incident_e_t1 = []
-        self.incident_e_t25 = []
-        self.incident_e_t50 = []
-        self.incident_e_t75 = []
-        self.incident_e_t99 = []
+        self.incident_e_step1 = []
+        self.incident_e_step25 = []
+        self.incident_e_step50 = []
+        self.incident_e_step75 = []
+        self.incident_e_step99 = []
     
     def __call__(self, score_model, marginal_prob_std, diffusion_coeff, sampled_energies, init_x, batch_size=1, energy_trans_file='', x_trans_file='', y_trans_file='', ine_trans_file=''):
         
+        # Time array
         t = torch.ones(batch_size, device=self.device)
-        
-        # Mean and std
-        mean_,std_ = marginal_prob_std(init_x,t)
-        std_.to(self.device)
-        
+
         # Padding masks defined by initial # hits / zero padding
-        padding_mask = (init_x[:,:,0]==-20).type(torch.bool)
-        
+        padding_mask = (init_x[:,:,0]== self.padding_value).type(torch.bool)
+
+        # !!!OBSOLETE!!!
         # Inverse mask to ignore models output for 0-padded hits in loss
-        output_mask = (init_x[:,:,0]!=-20).type(torch.int)
+        output_mask = (init_x[:,:,0]!= self.padding_value).type(torch.int)
         output_mask = output_mask.unsqueeze(-1)
         output_mask = output_mask.expand(output_mask.size()[0], output_mask.size()[1],4)
+        # !!!!!!!!!!!!!!
         
         # Establish time steps
         time_steps = np.linspace(1., self.eps, self.sampler_steps)
         step_size = time_steps[0]-time_steps[1]
+
         if self.jupyternotebook:
             time_steps = tqdm.notebook.tqdm(time_steps)
-        t = torch.ones(batch_size, device=self.device)
-        
-        #init_x = init_x * std_[:,None,None]
-        #init_x = self.sde.prior_sampling(init_x.shape).to(self.device)
-        #init_x = mean_ * std_[:,None,None]
         
         # Input shower is just some noise * std from SDE
         x = init_x
@@ -342,205 +337,209 @@ class pc_sampler:
                 scalar_x = load(open(x_trans_file, 'rb'))
             if y_trans_file != '':
                 scalar_y = load(open(y_trans_file, 'rb'))
+                
+            # Matrix multiplication in GaussianFourier projection doesnt like float64
+            sampled_energies = sampled_energies.to(x.device, torch.float32)
+            
+            # Iterate through time steps
             for time_step in time_steps:
-                diffusion_step_+=1
+                
                 if not self.jupyternotebook:
                     print(f"Sampler step: {time_step:.4f}") 
                 
-                #print(f"Sampler step: {time_step:.4f}") 
                 batch_time_step = torch.ones(batch_size, device=x.device) * time_step
 
-                # matrix multiplication in GaussianFourier projection doesnt like float64
-                sampled_energies = sampled_energies.to(x.device, torch.float32)
                 alpha = torch.ones_like(torch.tensor(time_step))
 
                 # Corrector step (Langevin MCMC)
+                # Noise to add to input
+                #noise = torch.normal(0,1,size=x.shape, device=x.device)
+                z = torch.normal(0,1,size=x.shape, device=x.device)
                 
                 # Conditional score prediction gives estimate of noise to remove
                 grad = score_model(x, batch_time_step, sampled_energies, mask=padding_mask)
-                # Noise to add to input
-                r1, r2 = -2,2
-                noise = (r1 - r2) * torch.rand_like(x) + r2
-
                 # Multiply by mask so we don't add noise to padded values / use gradients for padding in loss
-                noise = noise * output_mask
-                grad = grad * output_mask
-
-                # Langevin corrector
-                # step size calculation: snr * ratio of gradients in noise / prediction used to calculate
-                flattened_scores = grad.reshape(grad.shape[0], -1)
-                grad_norm = torch.linalg.norm( flattened_scores, dim=-1 ).mean()
-                flattened_noise = noise.reshape(noise.shape[0],-1)
-                noise_norm = torch.linalg.norm( flattened_noise, dim=-1 ).mean()
-                langevin_step_size =  (self.snr * noise_norm / grad_norm)**2 * 2 * alpha
-                # Adjust inputs according to scores using Langevin iteration rule
-                x_mean = x + langevin_step_size * grad
-                x = x_mean + torch.sqrt(2 * langevin_step_size) * noise
+                #grad = grad * output_mask
+                #print(f'grad ({len(grad[0])}): {grad[0]}')
+                
+                nc_steps = 1
+                for n_ in range(nc_steps):
+                    # Langevin corrector
+                    noise = torch.normal(0,1,size=x.shape, device=x.device)
+                    #print(f'noise ({len(noise[0])}): {noise[0]}')
+                    #noise = noise * output_mask
+                    # step size calculation: snr * ratio of gradients in noise / prediction used to calculate
+                    flattened_scores = grad.reshape(grad.shape[0], -1)
+                    grad_norm = torch.linalg.norm( flattened_scores, dim=-1 ).mean()
+                    flattened_noise = noise.reshape(noise.shape[0],-1)
+                    noise_norm = torch.linalg.norm( flattened_noise, dim=-1 ).mean()
+                    langevin_step_size =  (self.snr * noise_norm / grad_norm)**2 * 2 * alpha
+                    # Adjust inputs according to scores using Langevin iteration rule
+                    x_mean = x + langevin_step_size * grad
+                    x = x_mean + torch.sqrt(2 * langevin_step_size) * noise
                 
                 # Euler-Maruyama Predictor
                 # Adjust inputs according to scores
-                #z = torch.rand_like(x)
-                #dt = -1./len(time_steps)
                 drift, diff = diffusion_coeff(x,batch_time_step)
-                #drift = drift - (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies, mask=padding_mask)
-                #x_mean = x + drift*dt
-                #x = x_mean + diff[:, None, None] * np.sqrt(-dt) * z
-                
-                x_mean = x + (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies, mask=padding_mask) * step_size
-                x = x_mean + torch.sqrt(diff**2 * step_size)[:, None, None] * noise
+                drift = drift - (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies, mask=padding_mask)
+                x_mean = x - drift*step_size
+                x = x_mean + torch.sqrt(diff**2*step_size)[:, None, None] * z
+                #print(f'x_mean ({len(x_mean[0])}): {x_mean[0]}')
+                #x_mean = x + (diff**2)[:, None, None] * score_model(x, batch_time_step, sampled_energies, mask=padding_mask) * step_size
+                #x = x_mean + torch.sqrt(diff**2 * step_size)[:, None, None] * noise
 
                 # Store distributions at different stages of diffusion
-                if diffusion_step_== 1:
-
+                if diffusion_step_== 0:
                     for shower_idx in range(0,len(x_mean)):
-                        masked_output = x_mean*output_mask
+                        masked_output = x_mean#*output_mask
                         all_ine = np.array( sampled_energies[shower_idx].cpu().numpy().copy() ).reshape(-1,1)
                         if ine_trans_file != '':
                             all_ine = scalar_ine.inverse_transform(all_ine)
                         all_ine = all_ine.flatten().tolist()[0]
-                        self.incident_e_t1.append( all_ine )
+                        self.incident_e_step1.append( all_ine )
                         
                         all_e = np.array( masked_output[shower_idx,:,0].cpu().numpy().copy() ).reshape(-1,1)
                         if energy_trans_file != '':
                             all_e = scalar_e.inverse_transform(all_e)
                         all_e = all_e.flatten().tolist()
                         total_deposited_energy = sum( all_e )
-                        self.deposited_energy_t1.append(total_deposited_energy)
+                        self.deposited_energy_step1.append(total_deposited_energy)
                         
                         all_x = np.array( masked_output[shower_idx,:,1].cpu().numpy().copy() ).reshape(-1,1)
                         if x_trans_file != '':
                             all_x = scalar_x.inverse_transform(all_x)
                         all_x = all_x.flatten().tolist()
                         av_x_position = np.mean( all_x )
-                        self.av_x_pos_t1.append( av_x_position )
+                        self.av_x_pos_step1.append( av_x_position )
                         
                         all_y = np.array( masked_output[shower_idx,:,2].cpu().numpy().copy() ).reshape(-1,1)
                         if y_trans_file != '':
                             all_y = scalar_y.inverse_transform(all_y)
                         all_y = all_y.flatten().tolist()
                         av_y_position = np.mean( all_y )
-                        self.av_y_pos_t1.append( av_y_position )
-                if diffusion_step_== 10:
+                        self.av_y_pos_step1.append( av_y_position )
+                if diffusion_step_==80:
                     for shower_idx in range(0,len(x_mean)):
-                        masked_output = x_mean*output_mask
+                        masked_output = x_mean#*output_mask
                         all_ine = np.array( sampled_energies[shower_idx].cpu().numpy().copy() ).reshape(-1,1)
                         if ine_trans_file != '':
                             all_ine = scalar_ine.inverse_transform(all_ine)
                         all_ine = all_ine.flatten().tolist()[0]
-                        self.incident_e_t25.append( all_ine )
+                        self.incident_e_step25.append( all_ine )
                         
                         all_e = np.array( masked_output[shower_idx,:,0].cpu().numpy().copy() ).reshape(-1,1)
                         if energy_trans_file != '':
                             all_e = scalar_e.inverse_transform(all_e)
                         all_e = all_e.flatten().tolist()
                         total_deposited_energy = sum( all_e )
-                        self.deposited_energy_t25.append(total_deposited_energy)
+                        self.deposited_energy_step25.append(total_deposited_energy)
                         
                         all_x = np.array( masked_output[shower_idx,:,1].cpu().numpy().copy() ).reshape(-1,1)
                         if x_trans_file != '':
                             all_x = scalar_x.inverse_transform(all_x)
                         all_x = all_x.flatten().tolist()
                         av_x_position = np.mean( all_x )
-                        self.av_x_pos_t25.append( av_x_position )
+                        self.av_x_pos_step25.append( av_x_position )
                         
                         all_y = np.array( masked_output[shower_idx,:,2].cpu().numpy().copy() ).reshape(-1,1)
                         if y_trans_file != '':
                             all_y = scalar_y.inverse_transform(all_y)
                         all_y = all_y.flatten().tolist()
                         av_y_position = np.mean( all_y )
-                        self.av_y_pos_t25.append( av_y_position )
-                if diffusion_step_== 40:
+                        self.av_y_pos_step25.append( av_y_position )
+                if diffusion_step_== 90:
                     for shower_idx in range(0,len(x_mean)):
-                        masked_output = x_mean*output_mask
+                        masked_output = x_mean#*output_mask
                         all_ine = np.array( sampled_energies[shower_idx].cpu().numpy().copy() ).reshape(-1,1)
                         if ine_trans_file != '':
                             all_ine = scalar_ine.inverse_transform(all_ine)
                         all_ine = all_ine.flatten().tolist()[0]
-                        self.incident_e_t50.append( all_ine )
+                        self.incident_e_step50.append( all_ine )
                         
                         all_e = np.array( masked_output[shower_idx,:,0].cpu().numpy().copy() ).reshape(-1,1)
                         if energy_trans_file != '':
                             all_e = scalar_e.inverse_transform(all_e)
                         all_e = all_e.flatten().tolist()
                         total_deposited_energy = sum( all_e )
-                        self.deposited_energy_t50.append(total_deposited_energy)
+                        self.deposited_energy_step50.append(total_deposited_energy)
                         
                         all_x = np.array( masked_output[shower_idx,:,1].cpu().numpy().copy() ).reshape(-1,1)
                         if x_trans_file != '':
                             all_x = scalar_x.inverse_transform(all_x)
                         all_x = all_x.flatten().tolist()
                         av_x_position = np.mean( all_x )
-                        self.av_x_pos_t50.append( av_x_position )
+                        self.av_x_pos_step50.append( av_x_position )
                         
                         all_y = np.array( masked_output[shower_idx,:,2].cpu().numpy().copy() ).reshape(-1,1)
                         if y_trans_file != '':
                             all_y = scalar_y.inverse_transform(all_y)
                         all_y = all_y.flatten().tolist()
                         av_y_position = np.mean( all_y )
-                        self.av_y_pos_t50.append( av_y_position )
-                if diffusion_step_== 60:
+                        self.av_y_pos_step50.append( av_y_position )
+                if diffusion_step_== 95:
                     for shower_idx in range(0,len(x_mean)):
-                        masked_output = x_mean*output_mask
+                        masked_output = x_mean#*output_mask
                         all_ine = np.array( sampled_energies[shower_idx].cpu().numpy().copy() ).reshape(-1,1)
                         if ine_trans_file != '':
                             all_ine = scalar_ine.inverse_transform(all_ine)
                         all_ine = all_ine.flatten().tolist()[0]
-                        self.incident_e_t75.append( all_ine )
+                        self.incident_e_step75.append( all_ine )
                         
                         all_e = np.array( masked_output[shower_idx,:,0].cpu().numpy().copy() ).reshape(-1,1)
                         if energy_trans_file != '':
                             all_e = scalar_e.inverse_transform(all_e)
                         all_e = all_e.flatten().tolist()
                         total_deposited_energy = sum( all_e )
-                        self.deposited_energy_t75.append(total_deposited_energy)
+                        self.deposited_energy_step75.append(total_deposited_energy)
                         
                         all_x = np.array( masked_output[shower_idx,:,1].cpu().numpy().copy() ).reshape(-1,1)
                         if x_trans_file != '':
                             all_x = scalar_x.inverse_transform(all_x)
                         all_x = all_x.flatten().tolist()
                         av_x_position = np.mean( all_x )
-                        self.av_x_pos_t75.append( av_x_position )
+                        self.av_x_pos_step75.append( av_x_position )
                         
                         all_y = np.array( masked_output[shower_idx,:,2].cpu().numpy().copy() ).reshape(-1,1)
                         if y_trans_file != '':
                             all_y = scalar_y.inverse_transform(all_y)
                         all_y = all_y.flatten().tolist()
                         av_y_position = np.mean( all_y )
-                        self.av_y_pos_t75.append( av_y_position )
-                if diffusion_step_== 100:
+                        self.av_y_pos_step75.append( av_y_position )
+                if diffusion_step_== 99:
                     for shower_idx in range(0,len(x_mean)):
-                        masked_output = x_mean*output_mask
+                        masked_output = x_mean#*output_mask
                         all_ine = np.array( sampled_energies[shower_idx].cpu().numpy().copy() ).reshape(-1,1)
                         if ine_trans_file != '':
                             all_ine = scalar_ine.inverse_transform(all_ine)
                         all_ine = all_ine.flatten().tolist()[0]
-                        self.incident_e_t99.append( all_ine )
+                        self.incident_e_step99.append( all_ine )
                         
                         all_e = np.array( masked_output[shower_idx,:,0].cpu().numpy().copy() ).reshape(-1,1)
                         if energy_trans_file != '':
                             all_e = scalar_e.inverse_transform(all_e)
                         all_e = all_e.flatten().tolist()
                         total_deposited_energy = sum( all_e )
-                        self.deposited_energy_t99.append(total_deposited_energy)
+                        self.deposited_energy_step99.append(total_deposited_energy)
                         
                         all_x = np.array( masked_output[shower_idx,:,1].cpu().numpy().copy() ).reshape(-1,1)
                         if x_trans_file != '':
                             all_x = scalar_x.inverse_transform(all_x)
                         all_x = all_x.flatten().tolist()
                         av_x_position = np.mean( all_x )
-                        self.av_x_pos_t99.append( av_x_position )
+                        self.av_x_pos_step99.append( av_x_position )
                         
                         all_y = np.array( masked_output[shower_idx,:,2].cpu().numpy().copy() ).reshape(-1,1)
                         if y_trans_file != '':
                             all_y = scalar_y.inverse_transform(all_y)
                         all_y = all_y.flatten().tolist()
                         av_y_position = np.mean( all_y )
-                        self.av_y_pos_t99.append( av_y_position )
-
+                        self.av_y_pos_step99.append( av_y_position )
+                        
+                diffusion_step_+=1
         # Do not include noise in last step
         # Need to remove padded hits?
         #print('returned x_mean = ', x_mean*output_mask)
-        x_mean = x_mean*output_mask
+        x_mean = x_mean#*output_mask
         return x_mean
 
 def check_mem():
@@ -571,22 +570,31 @@ def get_prob_dist(x,y,nbins):
     hist[np.isnan(hist)] = 0.0
     return hist, xbin, ybin
 
-def generate_hits(prob, xbin, ybin, x_vals, max_hits, n_features, device='cpu'):
+def generate_hits(prob, xbin, ybin, x_vals, n_features, device='cpu'):
+    '''
+    prob = 2D PDF of nhits vs incident energy
+    x/ybin = histogram bins
+    x_vals = sample of incident energies (sampled from GEANT4)
+    n_features = # of feature dimensions e.g. (E,X,Y,Z) = 4
+    Returns:
+    pred_nhits = array of nhit values, one for each shower
+    y_pred = array of tensors (one for each shower) of initial noise values for features of each hit, sampled from normal distribution
+    '''
+    # bin index each incident energy falls into
     ind = np.digitize(x_vals, xbin) - 1
     ind[ind==len(xbin)-1] = len(xbin)-2
-    ind[ind==-1] = 0    
+    ind[ind==-1] = 0
+    # Construct list of nhits for given incident energies
+    prob_ = prob[ind,:]
+    
     y_pred = []
     pred_nhits = []
-    prob_ = prob[ind,:]
-    # range for random values of features
-    r1,r2 = -10, 10
     for i in range(len(prob_)):
         nhits = int(random_sampler(prob_[i],ybin + 1))
         pred_nhits.append(nhits)
-        #torch.randn(nhits, n_features)
-        #y_pred.append(torch.randn(nhits, n_features, device=device))
-        y_pred.append(( (r1 - r2) * torch.rand(nhits, n_features, device=device) + r2 ) )
-    
+        # Generate random values for features in all hits
+        ytmp = torch.normal(0,1,size=(nhits, n_features), device=device)
+        y_pred.append( ytmp )
     return pred_nhits, y_pred
 
 def main():
@@ -594,7 +602,7 @@ def main():
     argparser = argparse.ArgumentParser(usage)
     argparser.add_argument('-o','--output',dest='output_path', help='Path to output directory', default='', type=str)
     argparser.add_argument('-s','--switches',dest='switches', help='Binary representation of switches that run: evaluation plots, training, sampling, evaluation plots', default='0000', type=str)
-    argparser.add_argument('-i','--inputs',dest='inputs', help='Path to input directory', default='quantile_gauss_transformer', type=str)
+    argparser.add_argument('-i','--inputs',dest='inputs', help='Path to input directory', default='', type=str)
     args = argparser.parse_args()
     workingdir = args.output_path
     indir = args.inputs
@@ -624,16 +632,21 @@ def main():
     
     # Useful when debugging gradient issues
     torch.autograd.set_detect_anomaly(True)
-
+    
+    padding_value = 0.0
     ### HYPERPARAMETERS ###
     train_ratio = 0.8
     batch_size = 128
-    lr = 0.00001
+    lr = 0.0001
     n_epochs = 500
     ### SDE PARAMETERS ###
     SDE = 'VP'
-    sigma_max = 50.
-    sigma_min = 0.1
+    if SDE == 'VP':
+        sigma_max = 50.0
+        sigma_min = 0.1
+    if SDE == 'VE':
+        sigma_max = 20.0
+        sigma_min = 0.1
     ### MODEL PARAMETERS ###
     n_feat_dim = 4
     embed_dim = 512
@@ -643,7 +656,7 @@ def main():
     dropout_gen = 0
     # SAMPLER PARAMETERS
     sampler_steps = 100
-    n_showers_2_gen = 100
+    n_showers_2_gen = 1000
 
     model_params = f'''
     ### PARAMS ###
@@ -807,7 +820,9 @@ def main():
             print(f'Making new directory: {output_directory}')
             os.makedirs(output_directory)
         
+        # Instantiate model
         model=Gen(n_feat_dim, embed_dim, hidden_dim, num_encoder_blocks, num_attn_heads, dropout_gen, marginal_prob_std=marginal_prob_std_fn)
+
         table = PrettyTable(['Module name', 'Parameters listed'])
         t_params = 0
         for name_ , para_ in model.named_parameters():
@@ -866,6 +881,7 @@ def main():
                 
                 # Load shower batch for training
                 for i, (shower_data,incident_energies) in enumerate(shower_loader_train,0):
+                    
                     # Move model to device and set dtype as same as data (note torch.double works on both CPU and GPU)
                     model.to(device, shower_data.dtype)
                     model.train()
@@ -874,13 +890,17 @@ def main():
                     if len(shower_data) < 1:
                         print('Very few hits in shower: ', len(shower_data))
                         continue
+
                     # Zero any gradients from previous steps
                     optimiser.zero_grad()
+
                     # Loss average for each batch
-                    loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, device=device)
+                    loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value, device=device)
                     cumulative_epoch_loss+=float(loss)
+
                     # collect dL/dx for any parameters (x) which have requires_grad = True via: x.grad += dL/dx
                     loss.backward()
+
                     # Update value of x += -lr * x.grad
                     optimiser.step()
                 
@@ -891,7 +911,7 @@ def main():
                         model.eval()
                         shower_data = shower_data.to(device)
                         incident_energies = incident_energies.to(device)
-                        test_loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, device=device)
+                        test_loss = loss_fn(model, shower_data, incident_energies, marginal_prob_std_fn, padding_value, device=device)
                         cumulative_test_epoch_loss+=float(test_loss)
 
             # Add the batch size just used to the total number of clouds
@@ -936,20 +956,16 @@ def main():
         
         # Load saved model
         model=Gen(n_feat_dim, embed_dim, hidden_dim, num_encoder_blocks, num_attn_heads, dropout_gen, marginal_prob_std=marginal_prob_std_fn)
-        load_name = os.path.join(workingdir,'training_20230802_1816_output/ckpt_tmp_50.pth')
+        load_name = os.path.join(workingdir,'training_20230825_1601_output/ckpt_tmp_499.pth')
         model.load_state_dict(torch.load(load_name, map_location=device))
         model.to(device)
 
-        # Get max. N hits / N valid hits in batch
-        n_valid_hits_per_shower = []
-        incident_e_per_shower = []
+
         geant_deposited_energy = []
         geant_x_pos = []
         geant_y_pos = []
-        geant_ine = []
-        N_geant_showers_per_file = 0
-        N_geant_showers_total = 0
-        max_hits = -1
+        geant_ine = np.array([])
+        N_geant_showers = 0
 
         # For diffusion plots in 'physical' feature space, add files here
         energy_trans_file = ''#os.path.join(files_list_[0].rsplit('/',1)[0],'transform_e.pkl')
@@ -968,152 +984,171 @@ def main():
         if y_trans_file != '':
             scalar_y = load(open(y_trans_file, 'rb'))
         
-        if len(files_list_) > n_showers_2_gen:
-            print('WARNING: you are generating less showers than you have # files')
-            print('Will take one shower per file until n_showers_2_gen is reached')
-            n_showers_per_file = 1
-        else:
-            n_showers_per_file = n_showers_2_gen/len(files_list_)
+        n_files = len(files_list_)
+        nshowers_per_file = [n_showers_2_gen//n_files for x in range(n_files)]
+        r_ = n_showers_2_gen % nshowers_per_file[0]
+        nshowers_per_file[-1] = nshowers_per_file[-1]+r_
+        print(f'# showers per file: {nshowers_per_file}')
+        shower_counter = 0
 
-        for file in files_list_:
+        # create list to store final samples
+        sample_ = []
+        # instantiate sampler 
+        sampler = pc_sampler(sde=sde, padding_value=padding_value, snr=0.16, sampler_steps=sampler_steps, device=device, jupyternotebook=False)
+
+        # Collect Geant4 shower information
+        for file_idx in range(len(files_list_)):
+
+            # N valid hits used for 2D PDF
+            n_valid_hits_per_shower = np.array([])
+            # Incident particle energy for 2D PDF
+            incident_e_per_shower = np.array([])
+
+            max_hits = -1
+            file = files_list_[file_idx]
+            print(f'file: {file}')
+            shower_counter = 0
+
             # Load shower data
             custom_data = utils.cloud_dataset(file, device=device)
             point_clouds_loader = DataLoader(custom_data, batch_size=batch_size, shuffle=True)
             # Loop over batches
-            N_geant_showers_per_file = 0
             for i, (shower_data, incident_energies) in enumerate(point_clouds_loader,0):
                 # Copy data
                 valid_event = []
                 data_np = shower_data.cpu().numpy().copy()
                 energy_np = incident_energies.cpu().numpy().copy()
+
                 # Mask for padded values (padded values set to 0)
-                masking = data_np[:,:,0] != -20
-                print(f'trans_tdsm.py masking: {masking}')
-                
+                masking = data_np[:,:,0] != padding_value
+
                 # Loop over each shower in batch
                 for j in range(len(data_np)):
-                    # Mask padded hits and count valid hits for shower j in batch
-                    valid_hits = data_np[j][masking[j]]
+
+                    # valid hits for shower j in batch used for GEANT plot distributions
+                    valid_hits = data_np[j]
+
+                    # real (unpadded) hit multiplicity needed for the 2D PDF later
+                    n_valid_hits = data_np[j][masking[j]]
+
+                    n_valid_hits_per_shower = np.append(n_valid_hits_per_shower, len(n_valid_hits))
                     if len(valid_hits)>max_hits:
                         max_hits = len(valid_hits)
-                    
+
+                    incident_e_per_shower = np.append(incident_e_per_shower, energy_np[j])
+
                     # ONLY for plotting purposes
-                    # Skip if already generated enough total showers
-                    if N_geant_showers_total >= n_showers_2_gen:
+                    if shower_counter >= nshowers_per_file[file_idx]:
                         break
-                    # If we still want more showers to reach total desired
                     else:
-                        # If we still want more showers from this file
-                        if N_geant_showers_per_file < n_showers_per_file:
-                            incident_e_per_shower.append(energy_np[j])
-                            n_valid_hits_per_shower.append(len(valid_hits))
-                            N_geant_showers_total+=1
-                            N_geant_showers_per_file+=1
-                            all_ine = np.array(energy_np[j]).reshape(-1,1)
-                            # Rescale the conditional input for each shower
-                            if ine_trans_file != '':
-                                all_ine = scalar_ine.inverse_transform(all_ine)
-                            all_ine = all_ine.flatten().tolist()
-                            geant_ine.append(all_ine)
-                            
-                            all_e = valid_hits[:,0].reshape(-1,1)
-                            if energy_trans_file != '':
-                                all_e = scalar_e.inverse_transform(all_e)
-                            all_e = all_e.flatten().tolist()
-                            geant_deposited_energy.append( sum( all_e ) )
-                            
-                            all_x = valid_hits[:,1].reshape(-1,1)
-                            if x_trans_file != '':
-                                all_x = scalar_x.inverse_transform(all_x)
-                            all_x = all_x.flatten().tolist()
-                            geant_x_pos.append( np.mean(all_x) )
-                            
-                            all_y = valid_hits[:,2].reshape(-1,1)
-                            if y_trans_file != '':
-                                all_y = scalar_y.inverse_transform(all_y)
-                            all_y = all_y.flatten().tolist()
-                            geant_y_pos.append( np.mean(all_y) )
-                        else:
-                            break
+                        shower_counter+=1
+
+                        all_ine = energy_np[j].reshape(-1,1)
+
+                        # Rescale the conditional input for each shower
+                        if ine_trans_file != '':
+                            all_ine = scalar_ine.inverse_transform(all_ine)
+                        all_ine = all_ine.flatten().tolist()
+                        geant_ine = np.append(geant_ine,all_ine[0])
+                        
+                        all_e = valid_hits[:,0].reshape(-1,1)
+                        if energy_trans_file != '':
+                            all_e = scalar_e.inverse_transform(all_e)
+                        all_e = all_e.flatten().tolist()
+                        geant_deposited_energy.append( sum( all_e ) )
+                        
+                        all_x = valid_hits[:,1].reshape(-1,1)
+                        if x_trans_file != '':
+                            all_x = scalar_x.inverse_transform(all_x)
+                        all_x = all_x.flatten().tolist()
+                        geant_x_pos.append( np.mean(all_x) )
+                        
+                        all_y = valid_hits[:,2].reshape(-1,1)
+                        if y_trans_file != '':
+                            all_y = scalar_y.inverse_transform(all_y)
+                        all_y = all_y.flatten().tolist()
+                        geant_y_pos.append( np.mean(all_y) )
+
+                    N_geant_showers+=1
             del custom_data
 
-        # Arrays of Nvalid hits in showers, incident energies per shower
-        n_valid_hits_per_shower = np.array(n_valid_hits_per_shower)
-        incident_e_per_shower = np.array(incident_e_per_shower)
-        max_incident_e = max(incident_e_per_shower)
-        min_incident_e = min(incident_e_per_shower)
+            # Arrays of Nvalid hits in showers, incident energies per shower
+            n_valid_hits_per_shower = np.array(n_valid_hits_per_shower)
+            incident_e_per_shower = np.array(incident_e_per_shower)
+            #max_incident_e = max(incident_e_per_shower)
+            #min_incident_e = min(incident_e_per_shower)
 
-        # Generate 2D pdf of incident E vs N valid hits from the training file(s)
-        n_bins_prob_dist = 50
-        e_vs_nhits_prob, x_bin, y_bin = get_prob_dist(incident_e_per_shower, n_valid_hits_per_shower, n_bins_prob_dist)
+            # Generate 2D pdf of incident E vs N valid hits from the training file(s)
+            n_bins_prob_dist = 50
+            e_vs_nhits_prob, x_bin, y_bin = get_prob_dist(incident_e_per_shower, n_valid_hits_per_shower, n_bins_prob_dist)
 
-        # Plot 2D histogram (sanity check)
-        fig0, (ax0) = plt.subplots(ncols=1, sharey=True)
-        heatmap = ax0.pcolormesh(y_bin, x_bin, e_vs_nhits_prob, cmap='rainbow')
-        ax0.plot(n_valid_hits_per_shower, n_valid_hits_per_shower, 'k-')
-        ax0.set_xlim(n_valid_hits_per_shower.min(), n_valid_hits_per_shower.max())
-        ax0.set_ylim(incident_e_per_shower.min(), incident_e_per_shower.max())
-        ax0.set_xlabel('n_valid_hits_per_shower')
-        ax0.set_ylabel('incident_e_per_shower')
-        cbar = plt.colorbar(heatmap)
-        cbar.ax.set_ylabel('PDF', rotation=270)
-        ax0.set_title('histogram2d')
-        ax0.grid()
-        savefigname = os.path.join(output_directory,'validhits_ine_2D.png')
-        fig0.savefig(savefigname)
+            # Plot 2D histogram (sanity check)
+            fig0, (ax0) = plt.subplots(ncols=1, sharey=True)
+            heatmap = ax0.pcolormesh(y_bin, x_bin, e_vs_nhits_prob, cmap='rainbow')
+            ax0.plot(n_valid_hits_per_shower, n_valid_hits_per_shower, 'k-')
+            ax0.set_xlim(n_valid_hits_per_shower.min(), n_valid_hits_per_shower.max())
+            ax0.set_ylim(incident_e_per_shower.min(), incident_e_per_shower.max())
+            ax0.set_xlabel('n_valid_hits_per_shower')
+            ax0.set_ylabel('incident_e_per_shower')
+            cbar = plt.colorbar(heatmap)
+            cbar.ax.set_ylabel('PDF', rotation=270)
+            ax0.set_title('histogram2d')
+            ax0.grid()
+            savefigname = os.path.join(output_directory,'validhits_ine_2D.png')
+            fig0.savefig(savefigname)
 
-        # Generate tensor sampled from the appropriate range of injection energies
-        idx_list_incident_e = torch.randint(0, len(incident_e_per_shower), (n_showers_2_gen,))
-        in_energies = np.random.choice( incident_e_per_shower, n_showers_2_gen )
-        in_energies = torch.from_numpy(in_energies)
-
-        # Sample from 2D pdf = nhits per shower vs incident energies -> nhits and a tensor of randomly initialised hit features
-        nhits, gen_hits = generate_hits(e_vs_nhits_prob, x_bin, y_bin, in_energies, max_hits, 4, device=device)
-
-        # Save
-        torch.save([gen_hits, in_energies],'tmp.pt')
-
-        # Load the showers of noise
-        gen_hits = utils.cloud_dataset('tmp.pt', device=device)
-        # Pad showers with values of -20
-        gen_hits.padding(-20)
-        # Load len(gen_hits_loader) number of batches each with batch_size number of showers
-        gen_hits_loader = DataLoader(gen_hits, batch_size=batch_size, shuffle=False)
-
-        # Remove noise shower file
-        os.system("rm tmp.pt")
-
-        # Create instance of sampler
-        sample = []
-        sampler = pc_sampler(snr=0.16, sampler_steps=sampler_steps, device=device, jupyternotebook=False)
-
-        # Loop over each batch of noise showers
-        print(f'# batches: {len(gen_hits_loader)}' )
-        for i, (gen_hit, sampled_energies) in enumerate(gen_hits_loader,0):
-            
-            print(f'Generation batch {i}: showers per batch: {gen_hit.shape[0]}, max. hits per shower: {gen_hit.shape[1]}, features per hit: {gen_hit.shape[2]}, sampled_energies: {len(sampled_energies)}')    
-            sys.stdout.write('\r')
-            sys.stdout.write("Progress: %d/%d \n" % ((i+1), len(gen_hits_loader)))
-            sys.stdout.flush()
-            
-            # Run reverse diffusion sampler
-            generative = sampler(model, marginal_prob_std_fn, diffusion_coeff_fn, sampled_energies, gen_hit, batch_size=gen_hit.shape[0], energy_trans_file=energy_trans_file, x_trans_file=x_trans_file , y_trans_file = y_trans_file, ine_trans_file=ine_trans_file)
-            
-            # Create first sample or concatenate sample to sample list
-            if i == 0:
-                sample = generative
+            # Generate tensor sampled from the appropriate range of injection energies
+            in_energies = torch.from_numpy(np.random.choice( incident_e_per_shower, nshowers_per_file[file_idx] ))
+            if file_idx == 0:
+                sampled_ine = in_energies
             else:
-                sample = torch.cat([sample,generative])
-            
-            print(f'sample: {sample.shape}')
-            
-        sample_ = []
-        sample_np = sample.cpu().numpy()
+                sampled_ine = torch.cat([sampled_ine,in_energies])
 
-        for i in range(len(sample_np)):
-            tmp_sample = sample_np[i][:nhits[i]]
-            sample_.append(torch.tensor(tmp_sample))
-        torch.save([sample_,in_energies], os.path.join(output_directory, 'sample.pt'))
+            # Sample from 2D pdf = nhits per shower vs incident energies -> nhits and a tensor of randomly initialised hit features
+            nhits, gen_hits = generate_hits(e_vs_nhits_prob, x_bin, y_bin, in_energies, 4, device=device)
+
+            # Save
+            torch.save([gen_hits, in_energies],'tmp.pt')
+
+            # Load the showers of noise
+            gen_hits = utils.cloud_dataset('tmp.pt', device=device)
+            # Pad showers with values of 0
+            gen_hits.padding(padding_value)
+            # Load len(gen_hits_loader) number of batches each with batch_size number of showers
+            gen_hits_loader = DataLoader(gen_hits, batch_size=batch_size, shuffle=False)
+
+            # Remove noise shower file
+            os.system("rm tmp.pt")
+
+            # Create instance of sampler
+            sample = []
+            # Loop over each batch of noise showers
+            print(f'# batches: {len(gen_hits_loader)}' )
+            for i, (gen_hit, sampled_energies) in enumerate(gen_hits_loader,0):
+                print(f'Generation batch {i}: showers per batch: {gen_hit.shape[0]}, max. hits per shower: {gen_hit.shape[1]}, features per hit: {gen_hit.shape[2]}, sampled_energies: {len(sampled_energies)}')    
+                sys.stdout.write('\r')
+                sys.stdout.write("Progress: %d/%d \n" % ((i+1), len(gen_hits_loader)))
+                sys.stdout.flush()
+                
+                # Run reverse diffusion sampler
+                generative = sampler(model, marginal_prob_std_fn, diffusion_coeff_fn, sampled_energies, gen_hit, batch_size=gen_hit.shape[0], energy_trans_file=energy_trans_file, x_trans_file=x_trans_file , y_trans_file = y_trans_file, ine_trans_file=ine_trans_file)
+                
+                # Create first sample or concatenate sample to sample list
+                if i == 0:
+                    sample = generative
+                else:
+                    sample = torch.cat([sample,generative])
+                
+                print(f'sample: {sample.shape}')
+                
+            sample_np = sample.cpu().numpy()
+
+            for i in range(len(sample_np)):
+                tmp_sample = sample_np[i]#[:nhits[i]]
+                sample_.append(torch.tensor(tmp_sample))
+        
+        print(f'sample_: {len(sample_)}, sampled_ine: {len(sampled_ine)}')
+        torch.save([sample_,sampled_ine], os.path.join(output_directory, 'sample.pt'))
 
         # Create plots of distributions evolving with diffusion steps
         print(f'Drawing diffusion plots for average hit X & Y positions')
@@ -1121,16 +1156,16 @@ def main():
         ( ('X', 'Y'), 
         (geant_x_pos,
         geant_y_pos,
-        sampler.av_x_pos_t1,
-        sampler.av_y_pos_t1, 
-        sampler.av_x_pos_t25,
-        sampler.av_y_pos_t25,
-        sampler.av_x_pos_t50,
-        sampler.av_y_pos_t50,
-        sampler.av_x_pos_t75,
-        sampler.av_y_pos_t75,
-        sampler.av_x_pos_t99,
-        sampler.av_y_pos_t99) )
+        sampler.av_x_pos_step1,
+        sampler.av_y_pos_step1, 
+        sampler.av_x_pos_step25,
+        sampler.av_y_pos_step25,
+        sampler.av_x_pos_step50,
+        sampler.av_y_pos_step50,
+        sampler.av_x_pos_step75,
+        sampler.av_y_pos_step75,
+        sampler.av_x_pos_step99,
+        sampler.av_y_pos_step99) )
         ]
         util.display.make_diffusion_plot(distributions, output_directory)
 
@@ -1139,76 +1174,76 @@ def main():
         ( ('X', 'Total deposited energy [GeV]'), 
         (geant_x_pos,
         geant_deposited_energy,
-        sampler.av_x_pos_t1,
-        sampler.deposited_energy_t1, 
-        sampler.av_x_pos_t25,
-        sampler.deposited_energy_t25,
-        sampler.av_x_pos_t50,
-        sampler.deposited_energy_t50,
-        sampler.av_x_pos_t75,
-        sampler.deposited_energy_t75,
-        sampler.av_x_pos_t99,
-        sampler.deposited_energy_t99) )
+        sampler.av_x_pos_step1,
+        sampler.deposited_energy_step1, 
+        sampler.av_x_pos_step25,
+        sampler.deposited_energy_step25,
+        sampler.av_x_pos_step50,
+        sampler.deposited_energy_step50,
+        sampler.av_x_pos_step75,
+        sampler.deposited_energy_step75,
+        sampler.av_x_pos_step99,
+        sampler.deposited_energy_step99) )
         ]
         util.display.make_diffusion_plot(distributions, output_directory)
         print(f'Drawing diffusion plots for average hit energies and incident energy')
         distributions = [
         ( ('Total deposited energy', 'Incident particle energy [GeV]'), 
         (geant_deposited_energy,
-        incident_e_per_shower[:n_showers_2_gen],
-        sampler.deposited_energy_t1,
-        sampler.incident_e_t1, 
-        sampler.deposited_energy_t25,
-        sampler.incident_e_t25,
-        sampler.deposited_energy_t50,
-        sampler.incident_e_t50,
-        sampler.deposited_energy_t75,
-        sampler.incident_e_t75,
-        sampler.deposited_energy_t99,
-        sampler.incident_e_t99) )
+        geant_ine,
+        sampler.deposited_energy_step1,
+        sampler.incident_e_step1, 
+        sampler.deposited_energy_step25,
+        sampler.incident_e_step25,
+        sampler.deposited_energy_step50,
+        sampler.incident_e_step50,
+        sampler.deposited_energy_step75,
+        sampler.incident_e_step75,
+        sampler.deposited_energy_step99,
+        sampler.incident_e_step99) )
         ]
         util.display.make_diffusion_plot(distributions, output_directory)
 
         print('Plot hit energies')
         fig, (ax1, ax2, ax3, ax4, ax5) = plt.subplots(1,5, figsize=(27,9))
-        bins=np.histogram(np.hstack((geant_deposited_energy,sampler.deposited_energy_t1)), bins=50)[1]
+        bins=np.histogram(np.hstack((geant_deposited_energy,sampler.deposited_energy_step1)), bins=50)[1]
         ax1.set_title('t=1')
         ax1.set_ylabel('# entries')
         ax1.set_xlabel('Hit energy [GeV]')
         ax1.hist(geant_deposited_energy, bins, alpha=0.5, color='orange', label='Geant4')
-        ax1.hist(sampler.deposited_energy_t1, bins, alpha=0.5, color='blue', label='Gen')
+        ax1.hist(sampler.deposited_energy_step1, bins, alpha=0.5, color='blue', label='Gen')
         ax1.set_yscale('log')
         ax1.legend(loc='upper right')
         
-        ax2.set_title('t=25')
+        ax2.set_title('t=0.2')
         ax2.set_ylabel('# entries')
         ax2.set_xlabel('Hit energy [GeV]')
         ax2.hist(geant_deposited_energy, bins, alpha=0.5, color='orange', label='Geant4')
-        ax2.hist(sampler.deposited_energy_t25, bins, alpha=0.5, color='blue', label='Gen')
+        ax2.hist(sampler.deposited_energy_step25, bins, alpha=0.5, color='blue', label='Gen')
         ax2.set_yscale('log')
         ax2.legend(loc='upper right')
 
-        ax3.set_title('t=50')
+        ax3.set_title('t=0.1')
         ax3.set_ylabel('# entries')
         ax3.set_xlabel('Hit energy [GeV]')
         ax3.hist(geant_deposited_energy, bins, alpha=0.5, color='orange', label='Geant4')
-        ax3.hist(sampler.deposited_energy_t50, bins, alpha=0.5, color='blue', label='Gen')
+        ax3.hist(sampler.deposited_energy_step50, bins, alpha=0.5, color='blue', label='Gen')
         ax3.set_yscale('log')
         ax3.legend(loc='upper right')
 
-        ax4.set_title('t=75')
+        ax4.set_title('t=0.05')
         ax4.set_ylabel('# entries')
         ax4.set_xlabel('Hit energy [GeV]')
         ax4.hist(geant_deposited_energy, bins, alpha=0.5, color='orange', label='Geant4')
-        ax4.hist(sampler.deposited_energy_t75, bins, alpha=0.5, color='blue', label='Gen')
+        ax4.hist(sampler.deposited_energy_step75, bins, alpha=0.5, color='blue', label='Gen')
         ax4.set_yscale('log')
         ax4.legend(loc='upper right')
 
-        ax5.set_title('t=99')
+        ax5.set_title('t=0.0')
         ax5.set_ylabel('# entries')
         ax5.set_xlabel('Hit energy [GeV]')
         ax5.hist(geant_deposited_energy, bins, alpha=0.5, color='orange', label='Geant4')
-        ax5.hist(sampler.deposited_energy_t99, bins, alpha=0.5, color='blue', label='Gen')
+        ax5.hist(sampler.deposited_energy_step99, bins, alpha=0.5, color='blue', label='Gen')
         ax5.set_yscale('log')
         ax5.legend(loc='upper right')
 
@@ -1218,13 +1253,13 @@ def main():
     if switches_>>3 & trigger:
         # Distributions object for generated files
         print(f'Generated inputs')
-        output_directory = os.path.join(workingdir,'sampling_100samplersteps_20230804_0947_output')
+        output_directory = os.path.join(workingdir,'sampling_100samplersteps_20230829_1147_output')
         print(f'Evaluation outputs stored here: {output_directory}')
         plot_file_name = os.path.join(output_directory, 'sample.pt')
         custom_data = utils.cloud_dataset(plot_file_name,device=device)
         # when providing just cloud dataset, energy_trans_file needs to include full path
         #dists_gen = util.display.plot_distribution(custom_data, energy_trans_file='/eos/user/j/jthomasw/tdsm_encoder/datasets/power_transformer/transform_e.pkl', nshowers_2_plot=n_showers_2_gen)
-        dists_gen = util.display.plot_distribution(custom_data, nshowers_2_plot=n_showers_2_gen)
+        dists_gen = util.display.plot_distribution(custom_data, nshowers_2_plot=n_showers_2_gen, padding_value=padding_value)
 
         entries_gen = dists_gen[0]
         all_incident_e_gen = dists_gen[1]
@@ -1240,7 +1275,7 @@ def main():
         print(f'Geant4 inputs')
         # Distributions object for Geant4 files
         #dists = util.display.plot_distribution(files_list_, energy_trans_file='transform_e.pkl', nshowers_2_plot=n_showers_2_gen)
-        dists = util.display.plot_distribution(files_list_, nshowers_2_plot=n_showers_2_gen)
+        dists = util.display.plot_distribution(files_list_, nshowers_2_plot=n_showers_2_gen, padding_value=padding_value)
 
         entries = dists[0]
         all_incident_e = dists[1]
