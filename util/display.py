@@ -106,8 +106,15 @@ def plot_distribution(files_:Union[ list , utils.cloud_dataset], nshowers_2_plot
                     shower_counter+=1
                     
                     # Only use non-padded values for plots
-                    valid_hits = data_np[j]#[mask[j]]
-                    
+                    valid_hits = data_np[j][mask[j]]
+                    if len(valid_hits)==0:
+                      entries.extend([0])
+                      total_deposited_e_shower.extend([0])
+                      all_incident_e.extend([0])
+                      average_x_shower.extend([0])
+                      average_y_shower.extend([0])
+                      average_z_shower.extend([0])
+                      continue
                     # To transform back to original energies for plots
                     all_e = np.array(valid_hits[:,0]).reshape(-1,1)
                     all_x = np.array(valid_hits[:,1]).reshape(-1,1)
